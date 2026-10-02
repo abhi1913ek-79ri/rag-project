@@ -10,9 +10,22 @@ from services.semantic_chunker import (
     calculate_threshold,
     find_boundaries,
     find_semantic_boundaries,
-    create_chunks
+    create_chunks,
+    generate_document_id,
+    generate_document_id_from_file,
+    generate_chunk_id,
+    create_citation_map,
+    format_citation,
+    retrieve_similar_chunks,
+    generate_query_embedding,
+    filter_by_similarity,
+    has_relevant_chunks,
+    create_retrieval_citation,
+    create_retrieval_citation_map,
+    build_context,
+    build_prompt,
+    build_response
 )
-
 
 pdf = open_pdf("documents/sample.pdf")
 
@@ -148,7 +161,237 @@ print("\n--- CHUNK METADATA TEST ---")
 #     print("\n", chunk_data)
 
 
-print("\n--- METADATA-AWARE CHUNKS ---")
+# print("\n--- METADATA-AWARE CHUNKS ---")
 
-for chunk in chunks:
-    print("\n", chunk)
+# for chunk in chunks:
+#     print("\n", chunk)
+
+print("\n--- PAGE-WISE METADATA TEST ---")
+
+document_id = generate_document_id_from_file(
+    "documents/sample.pdf"
+)
+
+next_chunk_index = 1
+
+pages = [
+    {
+        "page": 1,
+        "text": extract_page_text(pdf, 0)
+    },
+    {
+        "page": 2,
+        "text": extract_page_text(pdf, 1)
+    }
+]
+
+for page_data in pages:
+
+    page_number = page_data["page"]
+    page_text = page_data["text"]
+
+    page_paragraphs = split_into_paragraphs(page_text)
+
+    page_embeddings = generate_embeddings(page_paragraphs)
+
+    page_similarities = calculate_similarities(
+        page_embeddings
+    )
+
+    page_boundaries = find_semantic_boundaries(
+        page_similarities,
+        min_strength=0.30
+    )
+
+    page_chunks = create_chunks(
+        page_paragraphs,
+        page_boundaries,
+        document_id=document_id,
+        filename="sample.pdf",
+        page=page_number,
+        start_chunk_index=next_chunk_index
+    )
+
+    next_chunk_index += len(page_chunks)
+
+    print(f"\nPage {page_number}")
+    print("Chunks:", len(page_chunks))
+
+    for chunk in page_chunks:
+        print("\n--- CHUNK ---")
+        print("Chunk ID:", chunk["chunk_id"])
+        print("Document ID:", chunk["document_id"])
+        print("Filename:", chunk["filename"])
+        print("Page:", chunk["page"])
+        print("Chunk Index:", chunk["chunk_index"])
+        print("Text:", chunk["text"])
+
+
+print("\n--- DOCUMENT ID TEST ---")
+
+filename = "sample.pdf"
+
+document_id = generate_document_id(filename)
+
+print("Filename:", filename)
+print("Document ID:", document_id)
+print("ID length:", len(document_id))
+
+
+print("\n--- FILE CONTENT DOCUMENT ID TEST ---")
+
+file_path = "documents/sample.pdf"
+
+file_document_id = generate_document_id_from_file(
+    file_path
+)
+
+print("File:", file_path)
+print("Document ID:", file_document_id)
+print("ID length:", len(file_document_id))
+
+
+print("\n--- CHUNK ID TEST ---")
+
+test_document_id = "abc123"
+test_chunk_index = 5
+
+chunk_id = generate_chunk_id(
+    test_document_id,
+    test_chunk_index
+)
+
+print("Document ID:", test_document_id)
+print("Chunk Index:", test_chunk_index)
+print("Chunk ID:", chunk_id)
+
+
+print("\n--- CITATION MAP TEST ---")
+
+citation_map = create_citation_map(page_chunks)
+
+for citation, metadata in citation_map.items():
+    print(citation, "→", metadata)
+
+
+
+print("\n--- FORMATTED CITATION TEST ---")
+
+for citation_number, citation in enumerate(
+    citation_map.values(),
+    start=1
+):
+    formatted = format_citation(
+        citation_number,
+        citation
+    )
+
+    print(formatted)
+
+
+
+print("\n--- SEMANTIC RETRIEVAL TEST ---")
+
+query = "What is authorization?"
+
+query_embedding = generate_query_embedding(query)
+
+chunk_embeddings = generate_embeddings(
+    [chunk["text"] for chunk in page_chunks]
+)
+
+results = retrieve_similar_chunks(
+    query_embedding,
+    chunk_embeddings,
+    page_chunks,
+    top_k=3
+)
+
+print("Query:", query)
+
+for result in results:
+    print(
+        "Similarity:",
+        result["similarity"],
+        "| Chunk:",
+        result["chunk"]["chunk_id"]
+    )
+
+print("\n--- SIMILARITY FILTER TEST ---")
+
+filtered_results = filter_by_similarity(
+    results,
+    threshold=0.30
+)
+
+for result in filtered_results:
+    print(
+        "Similarity:",
+        result["similarity"],
+        "| Chunk:",
+        result["chunk"]["chunk_id"]
+    )
+
+print("\n--- RELEVANT CHUNKS CHECK ---")
+
+if has_relevant_chunks(filtered_results):
+    print("Relevant chunks found.")
+else:
+    print("No relevant chunks found.")
+
+print("\n--- EMPTY RESULT TEST ---")
+
+empty_results = []
+
+if has_relevant_chunks(empty_results):
+    print("Relevant chunks found.")
+else:
+    print("No relevant chunks found.")
+
+
+
+print("\n--- RETRIEVAL CITATION TEST ---")
+
+for result in filtered_results:
+    citation = create_retrieval_citation(result)
+
+    print(citation)
+
+
+print("\n--- RETRIEVAL CITATION MAP TEST ---")
+
+retrieval_citation_map = create_retrieval_citation_map(
+    filtered_results
+)
+
+for citation, metadata in retrieval_citation_map.items():
+    print(citation, "→", metadata)
+
+
+print("\n--- CONTEXT BUILD TEST ---")
+
+context = build_context(filtered_results)
+
+print(context)
+
+
+
+print("\n--- PROMPT BUILD TEST ---")
+
+query = "What is authorization?"
+
+prompt = build_prompt(
+    query,
+    context
+)
+
+print(prompt)
+
+print("\n--- FINAL RESPONSE STRUCTURE TEST ---")
+
+response = build_response(
+    "Authorization defines what an authenticated user is allowed to do. [1]",
+    retrieval_citation_map
+)
+
+print(response)
