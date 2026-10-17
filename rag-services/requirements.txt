@@ -2,3 +2,5 @@ fastapi
 uvicorn
 PyMuPDF
 sentence-transformers
+google-genai
+python-dotenv

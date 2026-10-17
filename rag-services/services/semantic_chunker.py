@@ -2,9 +2,10 @@ from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 import hashlib
-
+import re
 
 model = SentenceTransformer("all-MiniLM-L6-v2")
+
 
 def generate_embeddings(paragraphs):
     return model.encode(paragraphs)
@@ -273,6 +274,247 @@ def build_response(answer, citation_map):
         "answer": answer,
         "citations": citation_map
     }
+
+
+def validate_citation_references(answer, citation_map):
+    # Find references such as [1], [2], [3]
+    references = re.findall(r"\[(\d+)\]", answer)
+
+    # Remove duplicate references while preserving order
+    references = list(dict.fromkeys(references))
+
+    # Check whether each reference exists in the citation map
+    valid_references = []
+    invalid_references = []
+
+    for reference in references:
+        citation_key = f"[{reference}]"
+
+        if citation_key in citation_map:
+            valid_references.append(citation_key)
+        else:
+            invalid_references.append(citation_key)
+
+    return {
+        "valid": len(invalid_references) == 0,
+        "valid_references": valid_references,
+        "invalid_references": invalid_references
+    }
+
+
+def find_unused_citations(answer, citation_map):
+    # Extract citation references used in the answer
+    references = re.findall(r"\[(\d+)\]", answer)
+
+    used_references = {
+        f"[{reference}]"
+        for reference in references
+    }
+
+    # Find citations that exist in the map but were not used
+    unused_references = []
+
+    for citation_key in citation_map:
+        if citation_key not in used_references:
+            unused_references.append(citation_key)
+
+    return unused_references
+
+def get_source_text_for_citation(citation_number, results):
+    """
+    Retrieve the original source text associated with a citation.
+
+    Example:
+    citation_number = "[1]"
+    results = filtered retrieval results
+    """
+
+    try:
+        index = int(citation_number.strip("[]")) - 1
+    except ValueError:
+        return None
+
+    if index < 0 or index >= len(results):
+        return None
+
+    return results[index]["chunk"]["text"]
+
+def summarize_verification_results(verification_results):
+    summary = {
+        "total_claims": len(verification_results),
+        "supported": 0,
+        "not_supported": 0,
+        "uncertain": 0
+    }
+
+    for result in verification_results:
+        verification_items = result.get("verification", [])
+
+        # A claim without verification results is uncertain.
+        if not verification_items:
+            summary["uncertain"] += 1
+            continue
+
+        verdicts = [
+            item.get("verdict", "UNCERTAIN").upper()
+            for item in verification_items
+        ]
+
+        # A claim is supported if at least one cited source
+        # supports it and no cited source contradicts it.
+        if "NOT_SUPPORTED" in verdicts:
+            summary["not_supported"] += 1
+
+        elif "SUPPORTED" in verdicts:
+            summary["supported"] += 1
+
+        else:
+            summary["uncertain"] += 1
+
+    return summary
+
+def calculate_citation_usage(answer, citation_map):
+    import re
+
+    used_references = set(
+        re.findall(r"\[(\d+)\]", answer)
+    )
+
+    available_references = {
+        key.strip("[]")
+        for key in citation_map
+    }
+
+    valid_used = used_references & available_references
+    unused = available_references - used_references
+    invalid = used_references - available_references
+
+    return {
+        "total_available": len(available_references),
+        "total_used": len(valid_used),
+        "unused_citations": [
+            f"[{ref}]" for ref in sorted(unused, key=int)
+        ],
+        "invalid_citations": [
+            f"[{ref}]" for ref in sorted(invalid, key=int)
+        ]
+    }
+
+def compare_cited_source_with_retrieved(
+    citation,
+    citation_map,
+    retrieved_results
+):
+    cited_metadata = citation_map.get(citation)
+
+    if cited_metadata is None:
+        return {
+            "citation": citation,
+            "found": False,
+            "reason": "Citation not found in citation map."
+        }
+
+    cited_chunk_id = cited_metadata.get("chunk_id")
+
+    cited_score = cited_metadata.get("similarity")
+
+    comparisons = []
+
+    for result in retrieved_results:
+        chunk = result["chunk"]
+
+        comparisons.append({
+            "chunk_id": chunk.get("chunk_id"),
+            "filename": chunk.get("filename"),
+            "page": chunk.get("page"),
+            "similarity": result.get("similarity")
+        })
+
+    comparisons.sort(
+        key=lambda item: item["similarity"] or 0,
+        reverse=True
+    )
+
+    cited_rank = next(
+        (
+            index + 1
+            for index, item in enumerate(comparisons)
+            if item["chunk_id"] == cited_chunk_id
+        ),
+        None
+    )
+
+    return {
+        "citation": citation,
+        "found": cited_rank is not None,
+        "cited_similarity": cited_score,
+        "cited_rank": cited_rank,
+        "retrieved_chunks": comparisons
+    }
+
+
+def determine_overall_verdict(verification_items):
+    if not verification_items:
+        return "UNCERTAIN"
+
+    verdicts = [
+        item.get("verdict", "UNCERTAIN").upper()
+        for item in verification_items
+    ]
+
+    allowed_verdicts = {
+        "SUPPORTED",
+        "NOT_SUPPORTED",
+        "CONTRADICTED",
+        "UNCERTAIN"
+    }
+
+    if any(v not in allowed_verdicts for v in verdicts):
+        return "UNCERTAIN"
+
+    # Actual contradiction takes priority.
+    if "CONTRADICTED" in verdicts:
+        return "CONTRADICTED"
+
+    # At least one source supports the claim.
+    if "SUPPORTED" in verdicts:
+        return "SUPPORTED"
+
+    # No source supports the claim, but at least one
+    # source directly contradicts it: handled above.
+    if "NOT_SUPPORTED" in verdicts:
+        return "NOT_SUPPORTED"
+
+    return "UNCERTAIN"
+
+def summarize_claim_audit(claim_audit_results):
+    summary = {
+        "total_claims": len(claim_audit_results),
+        "supported": 0,
+        "not_supported": 0,
+        "uncertain": 0,
+        "conflicting": 0
+    }
+
+    for result in claim_audit_results:
+        verdict = result.get(
+            "overall_verdict",
+            "UNCERTAIN"
+        ).upper()
+
+        if verdict == "SUPPORTED":
+            summary["supported"] += 1
+
+        elif verdict == "NOT_SUPPORTED":
+            summary["not_supported"] += 1
+
+        elif verdict == "CONFLICTING":
+            summary["conflicting"] += 1
+
+        else:
+            summary["uncertain"] += 1
+
+    return summary
 
 """ 
 Paragraphs
