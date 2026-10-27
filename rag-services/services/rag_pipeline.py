@@ -31,7 +31,12 @@ from services.semantic_chunker import (
 
     # Claim audit
     determine_overall_verdict,
-    summarize_claim_audit
+    summarize_claim_audit,
+
+    #intent classification
+    classify_query_intent
+
+    
 )
 
 from services.llm_service import (
@@ -41,8 +46,15 @@ from services.llm_service import (
     # Claim extraction and verification
     extract_claims_and_citations,
     verify_citation_support,
-    parse_verification_result
+    parse_verification_result,
+    verify_multiple_claims,
+    parse_multiple_verification_results
 )
+
+import time
+
+# In-memory cache for processed documents
+document_cache = {}
 
 def process_pdf(pdf_path: str) -> list:
     """
@@ -102,8 +114,41 @@ def run_rag_query(query: str, pdf_path: str) -> dict:
     and generate an answer with source citations.
     """
 
+    
+    # intent classification
+    # intent = classify_query_intent(query)
+    # print("Detected query intent:", intent)
+    start = time.perf_counter()
+
+    intent = classify_query_intent(query)
+
+    print(
+        f"Intent detection: "
+        f"{time.perf_counter() - start:.2f} seconds"
+    )
+
     # Step 1: Process the PDF
-    chunks = process_pdf(pdf_path)
+    # chunks = process_pdf(pdf_path)
+    start = time.perf_counter()
+
+    # Step 1: Generate a cache key for this PDF
+    document_id = generate_document_id_from_file(pdf_path)
+
+    # Step 2: Check whether the PDF is already cached
+    if document_id in document_cache:
+        chunks = document_cache[document_id]["chunks"]
+        print("PDF cache: HIT")
+    else:
+        chunks = process_pdf(pdf_path)
+        document_cache[document_id] = {
+            "chunks": chunks
+        }
+        print("PDF cache: MISS")
+
+    print(
+        f"PDF processing: "
+        f"{time.perf_counter() - start:.2f} seconds"
+    )
 
     if not chunks:
         return {
@@ -112,13 +157,22 @@ def run_rag_query(query: str, pdf_path: str) -> dict:
         }
 
     # Step 2: Generate embeddings for all chunks
-    chunk_texts = [
-        chunk["text"]
-        for chunk in chunks
-    ]
+    start = time.perf_counter()
 
-    chunk_embeddings = generate_embeddings(chunk_texts)
+    if document_id in document_cache and "embeddings" in document_cache[document_id]:
+        chunk_embeddings = document_cache[document_id]["embeddings"]
+        print("Embedding cache: HIT")
+    else:
+        chunk_texts = [chunk["text"] for chunk in chunks]
+        chunk_embeddings = generate_embeddings(chunk_texts)
 
+        document_cache[document_id]["embeddings"] = chunk_embeddings
+        print("Embedding cache: MISS")
+
+    print(
+        f"Chunk embeddings: "
+        f"{time.perf_counter() - start:.2f} seconds"
+    )
     # Step 3: Generate query embedding
     query_embedding = generate_query_embedding(query)
 
@@ -156,7 +210,14 @@ def run_rag_query(query: str, pdf_path: str) -> dict:
     prompt = build_prompt(query, context)
 
     # Step 8: Generate answer using Gemini
+    # answer = generate_answer(prompt)
+    start = time.perf_counter()
     answer = generate_answer(prompt)
+
+    print(
+        f"Answer generation: "
+        f"{time.perf_counter() - start:.2f} seconds"
+    )
 
     # Step 9: Return answer and citations
 
@@ -184,8 +245,71 @@ def run_rag_query(query: str, pdf_path: str) -> dict:
 
     claim_audit_results = []
 
-    # Step 13: Verify each claim against its cited source
-    for item in extracted_claims:
+    # Step 13: Batch verify claims against their cited sources
+
+    verification_start = time.perf_counter()
+
+    # Store verification results for each claim and citation
+    verification_cache = {}
+
+    # Group claims by source text
+    source_groups = {}
+
+    for claim_index, item in enumerate(extracted_claims):
+        claim = item["claim"]
+        citations = item["citations"]
+
+        for citation in citations:
+            source_text = get_source_text_for_citation(
+                citation,
+                filtered_results
+            )
+
+            if source_text is None:
+                continue
+
+            source_key = (citation, source_text)
+
+            if source_key not in source_groups:
+                source_groups[source_key] = []
+
+            source_groups[source_key].append({
+                "claim_index": claim_index,
+                "claim": claim
+            })
+
+
+    # Verify claims belonging to each source in batches
+    for (citation, source_text), group in source_groups.items():
+
+        claims_to_verify = [
+            item["claim"] for item in group
+        ]
+
+        raw_results = verify_multiple_claims(
+            claims_to_verify,
+            source_text
+        )
+
+        parsed_results = parse_multiple_verification_results(
+            raw_results,
+            len(claims_to_verify)
+        )
+
+        for position, group_item in enumerate(group, start=1):
+            verification_cache[
+                (group_item["claim_index"], citation)
+            ] = parsed_results[position]
+
+
+    print(
+        f"Batch claim verification: "
+        f"{time.perf_counter() - verification_start:.2f} seconds"
+    )
+
+
+    # Build the audit results while preserving existing output structure
+    for claim_index, item in enumerate(extracted_claims):
         claim = item["claim"]
         citations = item["citations"]
 
@@ -220,14 +344,19 @@ def run_rag_query(query: str, pdf_path: str) -> dict:
                 })
                 continue
 
-            raw_verification = verify_citation_support(
-                claim,
-                source_text
+            parsed = verification_cache.get(
+                (claim_index, citation)
             )
 
-            parsed = parse_verification_result(
-                raw_verification
-            )
+            if parsed is None:
+                audited_claim["verification"].append({
+                    "citation": citation,
+                    "verdict": "UNCERTAIN",
+                    "reason": "Batch verification result was unavailable.",
+                    "source": None,
+                    "retrieval_comparison": None
+                })
+                continue
 
             source_metadata = citation_map.get(citation, {})
 
@@ -260,7 +389,7 @@ def run_rag_query(query: str, pdf_path: str) -> dict:
         )
 
         claim_audit_results.append(audited_claim)
-
+    
     # Step 14: Generate audit summary
     audit_summary = summarize_claim_audit(
         claim_audit_results

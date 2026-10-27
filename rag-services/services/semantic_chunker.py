@@ -3,6 +3,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 import hashlib
 import re
+from services.llm_service import generate_answer
 
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
@@ -236,7 +237,38 @@ def create_retrieval_citation_map(results):
 
     return citation_map
 
+def classify_query_intent(query: str) -> str:
+    """
+    Lightweight intent classification without an API call.
+    """
 
+    query_lower = query.lower().strip()
+
+    overview_phrases = [
+        "summarize",
+        "summary",
+        "overview",
+        "gist",
+        "what is this pdf about",
+        "what is this document about",
+        "what does this pdf contain",
+        "what does this document contain",
+        "main topics",
+        "key takeaways",
+        "brief me about",
+        "give me an overview",
+        "provide an overview",
+        "tell me about this document",
+        "tell me about this pdf",
+    ]
+
+    if any(
+        phrase in query_lower
+        for phrase in overview_phrases
+    ):
+        return "DOCUMENT_OVERVIEW"
+
+    return "SPECIFIC_QUESTION"
 def build_context(results):
     context_parts = []
 
@@ -515,6 +547,21 @@ def summarize_claim_audit(claim_audit_results):
             summary["uncertain"] += 1
 
     return summary
+
+if __name__ == "__main__":
+    test_queries = [
+        "Summarize this PDF",
+        "What is this PDF about?",
+        "Give me the gist of this document",
+        "What is JavaScript?",
+        "Explain closures"
+    ]
+
+    for query in test_queries:
+        intent = classify_query_intent(query)
+        print(f"Query: {query}")
+        print(f"Intent: {intent}\n")
+
 
 """ 
 Paragraphs

@@ -66,6 +66,104 @@ Do not use information outside the provided source.
     return response.text
 
 
+def verify_multiple_claims(claims, source_text):
+    """
+    Verify multiple claims against the same source
+    using a single Gemini API request.
+    """
+
+    if not claims:
+        return []
+
+    claims_text = "\n".join(
+        f"{index}. {claim}"
+        for index, claim in enumerate(claims, start=1)
+    )
+
+    prompt = f"""
+You are a citation support verification assistant.
+
+Verify each claim independently using ONLY the source below.
+
+SOURCE:
+{source_text}
+
+CLAIMS:
+{claims_text}
+
+For each claim, choose exactly one verdict:
+
+SUPPORTED:
+The source directly supports the claim.
+
+CONTRADICTED:
+The source directly contradicts the claim.
+
+NOT_SUPPORTED:
+The source neither supports nor directly contradicts the claim.
+
+UNCERTAIN:
+The source is ambiguous or insufficient to decide.
+
+Return one result for every claim, preserving their order.
+
+Use this exact format:
+
+Claim 1
+Verdict: SUPPORTED
+Reason: Brief explanation.
+
+Claim 2
+Verdict: NOT_SUPPORTED
+Reason: Brief explanation.
+
+Do not use information outside the provided source.
+Do not omit or merge claims.
+"""
+
+    response = client.models.generate_content(
+        model="gemini-3.5-flash-lite",
+        contents=prompt
+    )
+
+    return response.text
+
+def parse_multiple_verification_results(response_text, expected_count):
+    """
+    Parse batch verification text into structured results.
+    """
+
+    import re
+
+    pattern = (
+        r"Claim\s+(\d+)\s*"
+        r"Verdict:\s*(SUPPORTED|CONTRADICTED|NOT_SUPPORTED|UNCERTAIN)\s*"
+        r"Reason:\s*(.*?)(?=\n\s*Claim\s+\d+|\Z)"
+    )
+
+    matches = re.findall(
+        pattern,
+        response_text,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+
+    results = {}
+
+    for claim_number, verdict, reason in matches:
+        results[int(claim_number)] = {
+            "verdict": verdict.upper(),
+            "reason": reason.strip()
+        }
+
+    # Validate that every expected claim was returned.
+    if len(results) != expected_count:
+        raise ValueError(
+            f"Expected {expected_count} verification results, "
+            f"but parsed {len(results)}."
+        )
+
+    return results
+
 def extract_claims_and_citations(answer):
     prompt = f"""
 You are a claim and citation extraction assistant.
@@ -178,3 +276,46 @@ def parse_verification_result(result_text):
         "verdict": verdict,
         "reason": reason
     }
+
+if __name__ == "__main__":
+    source_text = """
+    JavaScript is a programming language used to add
+    behavior and interactivity to web pages.
+    JavaScript was created in 1995.
+    """
+
+    claims = [
+        "JavaScript adds interactivity to web pages.",
+        "JavaScript was created in 1995.",
+        "JavaScript was created in 2010."
+    ]
+
+    import time
+
+    start = time.perf_counter()
+
+    result = verify_multiple_claims(
+        claims=claims,
+        source_text=source_text
+    )
+
+    print("\nVerification Results:")
+    print(result)
+
+    print(
+        f"\nTotal verification time: "
+        f"{time.perf_counter() - start:.2f} seconds"
+    )
+
+    print("\nVerification Results:")
+    print(result)
+
+    parsed_results = parse_multiple_verification_results(
+        result,
+        expected_count=len(claims)
+    )
+
+    print("\nParsed Results:")
+
+    for claim_number, verification in parsed_results.items():
+        print(f"Claim {claim_number}: {verification}")
