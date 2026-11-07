@@ -181,7 +181,8 @@ def run_rag_query(query: str, pdf_path: str) -> dict:
         query_embedding=query_embedding,
         chunk_embeddings=chunk_embeddings,
         chunks=chunks,
-        top_k=3
+        top_k=3,
+        query=query
     )
 
     # Step 5: Filter by similarity

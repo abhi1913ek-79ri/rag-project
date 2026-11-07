@@ -5,7 +5,8 @@ import hashlib
 import json
 import pymupdf
 
-from services.rag_pipeline import run_rag_query,document_cache
+from services.rag_pipeline import run_rag_query, document_cache
+from services.summarization_service import summarize_document, invalidate_summary
 
 app = FastAPI(
     title="Document Intelligence RAG API",
@@ -96,13 +97,23 @@ class AuditRequest(BaseModel):
     document_id: str
 
 
+class SummaryRequest(BaseModel):
+    document_id: str
+    force: bool = False
+
+
 # Health check endpoint
 @app.get("/")
 def home():
     return {
-        "message": "RAG Service is running"
+        "message": "RAG Service is running",
+        "service": "document-intelligence-rag",
+        "version": app.version
     }
 
+@app.get("/health")
+def health():
+    return {"status": "ok", "service": "rag"}
 
 
 
@@ -137,6 +148,26 @@ def audit_document(request: AuditRequest):
             status_code=500,
             detail=f"RAG processing failed: {str(error)}"
         )
+
+
+@app.post("/summarize")
+def summarize_document_endpoint(request: SummaryRequest):
+    try:
+        pdf_path = get_pdf_path_by_id(request.document_id)
+        filename = metadata_filename(request.document_id)
+        return summarize_document(
+            document_id=request.document_id,
+            pdf_path=str(pdf_path),
+            filename=filename,
+            force=request.force,
+        )
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Document summarization failed: {str(error)}"
+        ) from error
 # upload file endpoint
 @app.post("/upload")
 async def upload_document(file: UploadFile = File(...)):
@@ -151,9 +182,9 @@ async def upload_document(file: UploadFile = File(...)):
     # Step 2: Generate a safe, unique filename
     import uuid
 
-    filename = f"{uuid.uuid4().hex}.pdf"
-
-    file_path = UPLOAD_DIR / filename
+    stored_filename = f"{uuid.uuid4().hex}.pdf"
+    original_filename = Path(file.filename or "document.pdf").name
+    file_path = UPLOAD_DIR / stored_filename
 
     # Step 3: Save the uploaded file with a size limit
     total_size = 0
@@ -249,22 +280,21 @@ async def upload_document(file: UploadFile = File(...)):
             "message": "Document already exists. Existing document reused.",
             "document_id": document_id,
             "filename": existing_document["filename"],
-            "pdf_path": existing_document["pdf_path"],
             "duplicate": True
         }
 
     # save doc meta data
     save_document_metadata(
         document_id=document_id,
-        filename=filename,
+        filename=original_filename,
         file_path=file_path
     )
     # Step 4: Return document information
     return {
         "message": "PDF uploaded successfully.",
         "document_id": document_id,
-        "filename": filename,
-        "pdf_path": str(file_path)
+        "filename": original_filename,
+        "stored_filename": stored_filename
     }
 
 @app.get("/documents/{document_id}")
@@ -273,8 +303,21 @@ def get_document(document_id: str):
 
     return {
         "message": "Document found.",
-        "filename": pdf_path.name
+        "document_id": document_id,
+        "filename": metadata_filename(document_id)
     }
+
+
+def metadata_filename(document_id: str) -> str:
+    try:
+        with METADATA_FILE.open("r", encoding="utf-8") as file:
+            metadata = json.load(file)
+        return metadata[document_id]["filename"]
+    except (OSError, json.JSONDecodeError, KeyError):
+        raise HTTPException(
+            status_code=500,
+            detail="Could not read document metadata."
+        )
 
 # Get all uploaded documents
 @app.get("/documents")
@@ -292,8 +335,7 @@ def get_all_documents():
             if pdf_path.is_file():
                 documents.append({
                     "document_id": document_id,
-                    "filename": document["filename"],
-                    "pdf_path": str(pdf_path)
+                    "filename": document["filename"]
                 })
 
         return {
@@ -326,6 +368,8 @@ def delete_document(document_id: str):
             detail="Could not read document metadata."
         )
 
+    deleted_filename = metadata.get(document_id, {}).get("filename", pdf_path.name)
+
     # Step 3: Remove the document metadata
     metadata.pop(document_id, None)
 
@@ -352,9 +396,10 @@ def delete_document(document_id: str):
 
     # Step 6: Remove cached chunks and embeddings
     document_cache.pop(document_id, None)
+    invalidate_summary(document_id)
 
     return {
         "message": "Document deleted successfully.",
         "document_id": document_id,
-        "filename": pdf_path.name
+        "filename": deleted_filename
     }

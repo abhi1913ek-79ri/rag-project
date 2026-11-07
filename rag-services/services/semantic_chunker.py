@@ -180,9 +180,11 @@ def retrieve_similar_chunks(
     query_embedding,
     chunk_embeddings,
     chunks,
-    top_k=3
+    top_k=3,
+    query=None
 ):
     similarities = []
+    query_terms = _extract_query_terms(query) if query else []
 
     for i, chunk_embedding in enumerate(chunk_embeddings):
         similarity = cosine_similarity(
@@ -192,11 +194,15 @@ def retrieve_similar_chunks(
 
         similarities.append({
             "chunk": chunks[i],
-            "similarity": float(similarity)
+            "similarity": float(similarity),
+            "lexical_match": _has_lexical_match(
+                chunks[i]["text"],
+                query_terms
+            )
         })
 
     similarities.sort(
-        key=lambda x: x["similarity"],
+        key=lambda x: (x["lexical_match"], x["similarity"]),
         reverse=True
     )
 
@@ -207,11 +213,31 @@ def generate_query_embedding(query):
     return model.encode(query)
 
 
+def _extract_query_terms(query):
+    stop_words = {
+        "a", "an", "and", "are", "about", "does", "for", "from",
+        "how", "in", "is", "of", "on", "or", "the", "this", "to",
+        "what", "which", "who", "with"
+    }
+    return [
+        term for term in re.findall(r"\b[\w'-]+\b", query.lower())
+        if term not in stop_words and len(term) > 1
+    ]
+
+
+def _has_lexical_match(text, query_terms):
+    normalized_text = text.lower()
+    return any(
+        re.search(rf"\b{re.escape(term)}\b", normalized_text)
+        for term in query_terms
+    )
+
+
 def filter_by_similarity(results, threshold=0.30):
     filtered_results = []
 
     for result in results:
-        if result["similarity"] >= threshold:
+        if result["similarity"] >= threshold or result.get("lexical_match", False):
             filtered_results.append(result)
 
     return filtered_results
@@ -223,6 +249,7 @@ def has_relevant_chunks(results):
 def create_retrieval_citation(result):
     citation = create_citation(result["chunk"])
     citation["similarity"] = result["similarity"]
+    citation["text"] = result["chunk"]["text"]
     return citation\
 
 def create_retrieval_citation_map(results):
@@ -524,6 +551,7 @@ def summarize_claim_audit(claim_audit_results):
         "total_claims": len(claim_audit_results),
         "supported": 0,
         "not_supported": 0,
+        "contradicted": 0,
         "uncertain": 0,
         "conflicting": 0
     }
@@ -537,6 +565,9 @@ def summarize_claim_audit(claim_audit_results):
         if verdict == "SUPPORTED":
             summary["supported"] += 1
 
+        elif verdict == "CONTRADICTED":
+            summary["contradicted"] += 1
+
         elif verdict == "NOT_SUPPORTED":
             summary["not_supported"] += 1
 
@@ -545,6 +576,13 @@ def summarize_claim_audit(claim_audit_results):
 
         else:
             summary["uncertain"] += 1
+
+    summary["verdict_counts"] = {
+        "SUPPORTED": summary["supported"],
+        "CONTRADICTED": summary["contradicted"],
+        "NOT_SUPPORTED": summary["not_supported"],
+        "UNCERTAIN": summary["uncertain"]
+    }
 
     return summary
 
